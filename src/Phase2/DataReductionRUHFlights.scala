@@ -1,10 +1,15 @@
 import org.apache.spark.sql.{SparkSession, DataFrame, Column}
 import org.apache.spark.sql.functions._
 
+import java.nio.file.{Files, Paths}
+
 object DataReductionRUHFlights {
 
-  // Safe accessor for dot-names like "movement.terminal"
   def c(name: String): Column = col(s"`$name`")
+
+  private def ensureDir(path: String): Unit = {
+    Files.createDirectories(Paths.get(path))
+  }
 
   def main(args: Array[String]): Unit = {
     val spark = SparkSession.builder()
@@ -12,10 +17,12 @@ object DataReductionRUHFlights {
       .master("local[*]")
       .getOrCreate()
 
-    // -------- PATHS --------
-    val inputPath      = "C:/Users/Hessa/data/preprocessed_dataset.parquet"
-    val outParquetPath = "C:/Users/Hessa/data/reduced_dataset.parquet"
-    val outCsvPath     = "C:/Users/Hessa/data/reduced_dataset_csv"
+    // -------- PATHS (REPO-RELATIVE) --------
+    val inputPath      = "data/processed/preprocessed_dataset.parquet"
+    val outParquetPath = "data/processed/reduced_dataset.parquet"
+    val outCsvPath     = "data/processed/reduced_dataset_csv"
+
+    ensureDir("data/processed")
 
     // -------- LOAD --------
     val df = spark.read.parquet(inputPath)
@@ -28,31 +35,17 @@ object DataReductionRUHFlights {
     println(s"Columns: $beforeCols")
     df.printSchema()
 
-    // -------- KEEP COLUMNS (your final choice) --------
+    // -------- KEEP COLUMNS --------
     val keepColsPreferred = Seq(
-      // time features
       "hour_of_day", "day_of_week", "is_weekend",
-
-      // airline + operational
       "airline.name", "status",
-
-      // flight type + cargo
       "flight_type", "isCargo_int",
-
-      // terminal + timezone
       "movement.terminal", "movement.airport.timeZone",
-
-      // aircraft
       "aircraft.model",
-
-      // destination (keep all destination-related)
       "destination_airport_iata", "destination_airport_icao", "destination_airport_name",
-
-      // target
       "peak_traffic_label"
     )
 
-    // keep only columns that actually exist (safe)
     val keepCols = keepColsPreferred.filter(df.columns.contains)
 
     // -------- REDUCE --------
@@ -82,8 +75,6 @@ object DataReductionRUHFlights {
     println(s"\nSaved reduced Parquet dataset to: $outParquetPath")
 
     // -------- SAVE (CSV) --------
-    // CSV doesn't support complex types like arrays/structs.
-    // Our reduced DF should be only primitive/string columns, so it's safe.
     reduced.coalesce(1)
       .write.mode("overwrite")
       .option("header", "true")

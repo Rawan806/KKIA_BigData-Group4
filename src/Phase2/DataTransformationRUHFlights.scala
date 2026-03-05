@@ -1,14 +1,19 @@
 import org.apache.spark.sql.{SparkSession, DataFrame, Column}
 import org.apache.spark.sql.functions._
-import org.apache.spark.ml.{Pipeline}
+import org.apache.spark.ml.Pipeline
 import org.apache.spark.ml.PipelineModel
 import org.apache.spark.ml.feature._
 import org.apache.spark.sql.types._
 
+import java.nio.file.{Files, Paths}
+
 object DataTransformationRUHFlights {
 
-  // Use backticks to safely reference columns with dots BEFORE renaming
   def q(name: String): Column = col(s"`$name`")
+
+  private def ensureDir(path: String): Unit = {
+    Files.createDirectories(Paths.get(path))
+  }
 
   def main(args: Array[String]): Unit = {
 
@@ -17,11 +22,14 @@ object DataTransformationRUHFlights {
       .master("local[*]")
       .getOrCreate()
 
-    // -------- PATHS --------
-    val inputPath      = "C:/Users/Hessa/data/reduced_dataset.parquet"
-    val outParquetPath = "C:/Users/Hessa/data/transformed_dataset.parquet"
-    val outCsvPath     = "C:/Users/Hessa/data/transformed_dataset_csv"
-    val pipelinePath   = "C:/Users/Hessa/data/models/transformation_pipeline"
+    // -------- PATHS (REPO-RELATIVE) --------
+    val inputPath      = "data/processed/reduced_dataset.parquet"
+    val outParquetPath = "data/processed/transformed_dataset.parquet"
+    val outCsvPath     = "data/processed/transformed_dataset_csv"
+    val pipelinePath   = "models/transformation_pipeline"
+
+    ensureDir("data/processed")
+    ensureDir("models")
 
     // -------- LOAD --------
     var df = spark.read.parquet(inputPath)
@@ -29,8 +37,7 @@ object DataTransformationRUHFlights {
     println("========== INPUT SCHEMA (BEFORE TRANSFORMATION) ==========")
     df.printSchema()
 
-    // -------- 0) RENAME dot-columns -> underscore columns (CRITICAL FIX) --------
-    // map old -> new
+    // -------- 0) RENAME dot-columns -> underscore columns --------
     val renameMap: Seq[(String, String)] = Seq(
       "airline.name" -> "airline_name",
       "movement.terminal" -> "movement_terminal",
@@ -44,7 +51,6 @@ object DataTransformationRUHFlights {
       }
     }
 
-    // Now the schema should have clean names
     println("\n========== SCHEMA (AFTER RENAMING DOT COLUMNS) ==========")
     df.printSchema()
 
@@ -62,7 +68,7 @@ object DataTransformationRUHFlights {
     // label for Spark ML
     df = df.withColumn("label", col("peak_traffic_label").cast(DoubleType))
 
-    // -------- 2) Clean categorical columns (replace null/blank with UNKNOWN) --------
+    // -------- 2) Clean categorical columns --------
     val categoricalColsPreferred = Seq(
       "airline_name",
       "status",
@@ -85,7 +91,6 @@ object DataTransformationRUHFlights {
       )
     }
 
-    // normalize some codes
     val upperCols = Seq("destination_airport_iata", "destination_airport_icao", "movement_terminal")
       .filter(df.columns.contains)
 
@@ -93,7 +98,7 @@ object DataTransformationRUHFlights {
       df = df.withColumn(cn, upper(col(cn)))
     }
 
-    // -------- 3) Encoding: StringIndexer -> OneHotEncoder --------
+    // -------- 3) Encoding --------
     val indexers: Array[StringIndexer] = categoricalCols.map { cn =>
       new StringIndexer()
         .setInputCol(cn)

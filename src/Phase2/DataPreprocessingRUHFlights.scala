@@ -2,10 +2,16 @@ import org.apache.spark.sql.{SparkSession, DataFrame, Column}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 
+import java.nio.file.{Files, Paths}
+
 object DataPreprocessingRUHFlights {
 
   // --- Safe column accessor for names that contain dots like "movement.scheduledTime.utc"
   def c(name: String): Column = col(s"`$name`")
+
+  private def ensureDir(path: String): Unit = {
+    Files.createDirectories(Paths.get(path))
+  }
 
   // --- 1) Missing summary (SAFE with dot column names)
   def missingSummary(df: DataFrame, label: String): DataFrame = {
@@ -42,7 +48,6 @@ object DataPreprocessingRUHFlights {
   // --- 3) Normalize null-like strings to null (for string columns only)
   // IMPORTANT: we do NOT treat "Unknown" as null because it is a valid category in this dataset (e.g., status=Unknown).
   def normalizeNullLikeStrings(df: DataFrame): DataFrame = {
-    // removed "unknown"
     val nullLike = Seq("null", "none", "na", "n/a", "nan", "")
 
     df.schema.fields.foldLeft(df) { (acc, f) =>
@@ -118,7 +123,8 @@ object DataPreprocessingRUHFlights {
     val threshold = if (q.nonEmpty) q(0) else Double.PositiveInfinity
 
     val labeledHourly =
-      hourly.withColumn("peak_traffic_label",
+      hourly.withColumn(
+        "peak_traffic_label",
         when(col("flights_in_hour") >= lit(threshold), lit(1)).otherwise(lit(0))
       )
 
@@ -141,15 +147,13 @@ object DataPreprocessingRUHFlights {
 
     import spark.implicits._
 
-    // ---------- PATHS ----------
-    val inputPath   = "C:/Users/Hessa/data/flights_RUH.parquet"
+    // ---------- PATHS (REPO-RELATIVE) ----------
+    val inputPath = "data/raw/flights_RUH.parquet"
 
-    // Output datasets (FULL)
-    val outputParquetPath = "C:/Users/Hessa/data/preprocessed_dataset.parquet"
-    val outputCsvPath     = "C:/Users/Hessa/data/preprocessed_dataset_csv"
-
-    // Stats / snapshots folder
-    val resultsPath = "C:/Users/Hessa/data/results/phase2_preprocessing_stats"
+    // (Optional) output folders (created for consistency, but no writing is performed in this report-mode)
+    val resultsPath = "results/phase2_preprocessing_stats"
+    ensureDir("results")
+    ensureDir(resultsPath)
 
     // ---------- LOAD ----------
     val raw = spark.read.parquet(inputPath)
@@ -237,7 +241,6 @@ object DataPreprocessingRUHFlights {
     }
 
     // ---------- PEAK LABEL ----------
-    // Target built from LOCAL hour_of_day distribution (top 90% threshold)
     if (clean.columns.contains("hour_of_day")) {
       val (labeled, thr) = addPeakLabelByPercentile(clean, percentile = 0.90)
       clean = labeled
@@ -279,66 +282,17 @@ object DataPreprocessingRUHFlights {
       clean.groupBy("peak_traffic_label").count().show(false)
     }
 
-    // ---------- SAVE (TWO DATASETS: Parquet + CSV) ----------
-
-    // 1) Save FULL dataset as Parquet (keeps array columns like movement.quality)
-    clean.write.mode("overwrite").parquet(outputParquetPath)
-    println(s"Saved FULL Parquet dataset to: $outputParquetPath")
-
-    // 2) Prepare CSV-safe version (convert array columns to string)
-    val cleanForCsv =
+    // ---------- SNAPSHOT FOR REPORT (PRINT ONLY) ----------
+    val cleanForSnapshot =
       if (clean.columns.contains("movement.quality"))
         clean.withColumn("movement.quality", concat_ws("|", c("movement.quality")))
       else clean
 
-    // Save FULL dataset as CSV (Report Version)
-    cleanForCsv
-      .coalesce(1) // optional: single CSV file
-      .write.mode("overwrite")
-      .option("header", "true")
-      .csv(outputCsvPath)
+    println("========== FINAL PREPROCESSED DATASET SNAPSHOT (20 rows) ==========")
+    cleanForSnapshot.limit(20).show(20, truncate = false)
 
-    println(s"Saved FULL CSV dataset to: $outputCsvPath")
+    // NOTE: File writing is disabled in this report-mode to avoid Windows Hadoop/winutils configuration issues.
 
-    // ---------- EXTRA CSV REPORTS ----------
-    // Snapshot 20 rows (CSV-safe)
-    val snapshot = cleanForCsv.limit(20)
-    snapshot.show(20, truncate = false)
-
-    snapshot.coalesce(1).write.mode("overwrite").option("header", "true")
-      .csv(s"$resultsPath/final_snapshot_20_rows_csv")
-    println(s"Saved 20-row snapshot CSV to: $resultsPath/final_snapshot_20_rows_csv")
-
-    // Missing compare CSV
-    missingCompare.coalesce(1).write.mode("overwrite").option("header", "true")
-      .csv(s"$resultsPath/missing_before_after_csv")
-    println(s"Saved missing summary to: $resultsPath/missing_before_after_csv")
-
-    // Basic stats CSV
-    val basicStats = Seq(
-      ("before_rows", beforeRows.toString),
-      ("after_rows", afterRows.toString),
-      ("rows_removed", (beforeRows - afterRows).toString),
-      ("before_cols", beforeCols.toString),
-      ("after_cols", afterCols.toString)
-    ).toDF("metric", "value")
-
-    basicStats.coalesce(1).write.mode("overwrite").option("header", "true")
-      .csv(s"$resultsPath/basic_stats_csv")
-    println(s"Saved basic stats to: $resultsPath/basic_stats_csv")
-
-    // Optional: Hourly counts CSV (great for report)
-    if (clean.columns.contains("hour_of_day")) {
-      val hourlyCounts =
-        clean.groupBy("hour_of_day")
-          .agg(count(lit(1)).alias("flights_in_hour"))
-          .orderBy("hour_of_day")
-
-      hourlyCounts.coalesce(1).write.mode("overwrite").option("header", "true")
-        .csv(s"$resultsPath/hourly_counts_csv")
-      println(s"Saved hourly counts to: $resultsPath/hourly_counts_csv")
-    }
-
-    // spark.stop()
+    spark.stop()
   }
 }
