@@ -4,10 +4,10 @@ import org.apache.spark.sql.types._
 
 object DataPreprocessingRUHFlights {
 
-  // --- Safe column accessor for names that contain dots like "movement.scheduledTime.utc"
-  def c(name: String): Column = col(s"$name")
+  // Safe column accessor for dotted column names
+  def c(name: String): Column = col(s"`$name`")
 
-  // --- 1) Missing summary (SAFE with dot column names)
+  // 1) Missing summary
   def missingSummary(df: DataFrame, label: String): DataFrame = {
     val cols = df.columns.toSeq
 
@@ -29,7 +29,7 @@ object DataPreprocessingRUHFlights {
     result
   }
 
-  // --- 2) Trim all string columns
+  // 2) Trim all string columns
   def withTrimmedStrings(df: DataFrame): DataFrame = {
     df.schema.fields.foldLeft(df) { (acc, f) =>
       f.dataType match {
@@ -39,10 +39,8 @@ object DataPreprocessingRUHFlights {
     }
   }
 
-  // --- 3) Normalize null-like strings to null (for string columns only)
-  // IMPORTANT: we do NOT treat "Unknown" as null because it is a valid category in this dataset (e.g., status=Unknown).
+  // 3) Normalize null-like strings
   def normalizeNullLikeStrings(df: DataFrame): DataFrame = {
-    // removed "unknown"
     val nullLike = Seq("null", "none", "na", "n/a", "nan", "")
 
     df.schema.fields.foldLeft(df) { (acc, f) =>
@@ -57,14 +55,14 @@ object DataPreprocessingRUHFlights {
     }
   }
 
-  // --- 4) Uppercase codes safely (keeps nulls)
+  // 4) Uppercase safely
   def safeUpper(df: DataFrame, columnName: String): DataFrame = {
     if (df.columns.contains(columnName))
       df.withColumn(columnName, upper(c(columnName)))
     else df
   }
 
-  // --- 5) Set invalid codes to null based on regex pattern
+  // 5) Regex validation
   def safeRegexNullify(df: DataFrame, columnName: String, pattern: String): (DataFrame, Long) = {
     if (!df.columns.contains(columnName)) return (df, 0L)
 
@@ -80,7 +78,7 @@ object DataPreprocessingRUHFlights {
     (updated, invalidCount)
   }
 
-  // --- 6) Robust timestamp parsing helpers
+  // 6) Timestamp parsing
   private def parseTsMulti(colStr: Column): Column = {
     val normalized = regexp_replace(colStr, "Z$", "+00:00")
 
@@ -89,11 +87,10 @@ object DataPreprocessingRUHFlights {
       to_timestamp(normalized, "yyyy-MM-dd HH:mmXXX"),
       to_timestamp(normalized, "yyyy-MM-dd HH:mm:ssX"),
       to_timestamp(normalized, "yyyy-MM-dd HH:mmX"),
-      to_timestamp(normalized) // fallback
+      to_timestamp(normalized)
     )
   }
 
-  // Create new parsed timestamp columns (do NOT overwrite originals)
   def addParsedTimestamps(df: DataFrame): DataFrame = {
     var out = df
     val localCol = "movement.scheduledTime.local"
@@ -108,7 +105,6 @@ object DataPreprocessingRUHFlights {
     out
   }
 
-  // Build peak label using hour_of_day counts (top percentile)
   def addPeakLabelByPercentile(df: DataFrame, percentile: Double = 0.90): (DataFrame, Double) = {
     val hourly =
       df.groupBy("hour_of_day")
@@ -118,7 +114,8 @@ object DataPreprocessingRUHFlights {
     val threshold = if (q.nonEmpty) q(0) else Double.PositiveInfinity
 
     val labeledHourly =
-      hourly.withColumn("peak_traffic_label",
+      hourly.withColumn(
+        "peak_traffic_label",
         when(col("flights_in_hour") >= lit(threshold), lit(1)).otherwise(lit(0))
       )
 
@@ -129,31 +126,11 @@ object DataPreprocessingRUHFlights {
     (out, threshold)
   }
 
-  def main(args: Array[String]): Unit = {
-
-    val spark = SparkSession.builder()
-      .appName("RUH Flights Preprocessing")
-      .master("local[*]")
-      .getOrCreate()
-
-    // Important for correct local feature extraction
+  def buildPreprocessedData(spark: SparkSession): DataFrame = {
     spark.conf.set("spark.sql.session.timeZone", "Asia/Riyadh")
-
     import spark.implicits._
 
-    // ---------- PATHS ----------
-    val base = "C:/Users/amusa/KKIA_BigDataGroup4/data"
-
-    val inputPath = s"$base/raw/flights_RUH.parquet"
-
-    // outputs from preprocessing
-    val outputParquetPath = s"$base/processed/preprocessed_dataset.parquet"
-    val outputCsvPath     = s"$base/processed/preprocessed_dataset_csv"
-
-    // stats
-    val resultsPath       = s"$base/results/phase2_preprocessing_stats"
-
-    // ---------- LOAD ----------
+    val inputPath = "data/raw/flights_RUH.parquet"
     val raw = spark.read.parquet(inputPath)
 
     println("========== RAW DATASET ==========")
@@ -166,10 +143,8 @@ object DataPreprocessingRUHFlights {
 
     val missingBefore = missingSummary(raw, "BEFORE")
 
-    // ---------- CLEANING ----------
     var clean = raw.transform(withTrimmedStrings).transform(normalizeNullLikeStrings)
 
-    // Uppercase important code columns
     val codeCols = Seq(
       "aircraft.reg",
       "aircraft.modeS",
@@ -182,15 +157,12 @@ object DataPreprocessingRUHFlights {
     )
     codeCols.foreach(colName => clean = safeUpper(clean, colName))
 
-    // Fix movement.terminal formatting (optional)
     if (clean.columns.contains("movement.terminal")) {
       clean = clean.withColumn("movement.terminal", upper(regexp_replace(c("movement.terminal"), "\\s+", "")))
     }
 
-    // Parse timestamps into new columns
     clean = addParsedTimestamps(clean)
 
-    // Filter rows missing local timestamp (your target derived from local time)
     if (clean.columns.contains("scheduled_local_ts")) {
       val beforeFilter = clean.count()
       clean = clean.filter(col("scheduled_local_ts").isNotNull)
@@ -198,7 +170,6 @@ object DataPreprocessingRUHFlights {
       println(s"Filtered rows where scheduled_local_ts is null: removed ${beforeFilter - afterFilter}")
     }
 
-    // Validate code formats (optional strict rules)
     var invalidStats = Seq.empty[(String, Long)]
     val formatRules = Seq(
       ("airline.iata", "^[A-Z0-9]{2}$"),
@@ -218,33 +189,28 @@ object DataPreprocessingRUHFlights {
     println("========== Invalid Format Counts (set to null) ==========")
     invalidStats.foreach { case (colName, cnt) => println(s"$colName -> $cnt") }
 
-    // ---------- FEATURE ENGINEERING (LOCAL time) ----------
     if (clean.columns.contains("scheduled_local_ts")) {
       clean = clean
         .withColumn("scheduled_date_local", to_date(col("scheduled_local_ts")))
         .withColumn("hour_of_day", hour(col("scheduled_local_ts")))
         .withColumn("day_of_week", dayofweek(col("scheduled_local_ts")))
-        .withColumn("is_weekend", when(col("day_of_week").isin(6, 7), 1).otherwise(0)) // Fri+Sat
+        .withColumn("is_weekend", when(col("day_of_week").isin(6, 7), 1).otherwise(0))
     }
 
     if (clean.columns.contains("isCargo")) {
       clean = clean.withColumn("isCargo_int", when(c("isCargo") === true, 1).otherwise(0))
     }
 
-    // Fill some key text columns with UNKNOWN (optional)
     val fillUnknown = Seq("airline.icao", "airline.iata", "destination_airport_icao", "destination_airport_iata")
       .filter(clean.columns.contains)
+
     fillUnknown.foreach { colName =>
       clean = clean.withColumn(colName, when(c(colName).isNull, lit("UNKNOWN")).otherwise(c(colName)))
     }
 
-    // ---------- DUPLICATES CHECK ----------
     val beforeDup = clean.count()
-
-    // If you want to check duplicates based on ALL columns:
-    val deduped = clean.dropDuplicates()
-
-    val afterDup = deduped.count()
+    clean = clean.dropDuplicates()
+    val afterDup = clean.count()
     val dupRemoved = beforeDup - afterDup
 
     println("========== DUPLICATE CHECK ==========")
@@ -252,15 +218,7 @@ object DataPreprocessingRUHFlights {
     println(s"Rows after removing duplicates:  $afterDup")
     println(s"Duplicate rows removed:          $dupRemoved")
 
-    // Replace clean with deduplicated version
-    clean = deduped
-
-    // ---------- OUTLIER CHECK (Hourly Flight Volume) ----------
-    // We detect extreme hourly volumes using IQR on flights_in_hour.
-    // This is meaningful for traffic/peak modeling.
-
     if (clean.columns.contains("hour_of_day")) {
-
       val hourly =
         clean.groupBy("hour_of_day")
           .agg(count(lit(1)).alias("flights_in_hour"))
@@ -289,21 +247,16 @@ object DataPreprocessingRUHFlights {
         outlierHours.show(50, truncate = false)
       }
 
-      // Decision: KEEP outlier hours (do NOT remove/cap),
-      // because peak traffic is a real-world behavior we want to model.
       println("Decision: Outlier hours were kept (they represent genuine peak traffic).")
     }
 
-    // ---------- PEAK LABEL ----------
-    // Target built from LOCAL hour_of_day distribution (top 90% threshold)
     if (clean.columns.contains("hour_of_day")) {
       val (labeled, thr) = addPeakLabelByPercentile(clean, percentile = 0.90)
       clean = labeled
-      println(s"========== Peak Label Threshold (Percentile 0.9) ==========")
+      println("========== Peak Label Threshold (Percentile 0.9) ==========")
       println(s"Hourly flights threshold = $thr")
     }
 
-    // ---------- REPORT ----------
     val afterRows = clean.count()
     val afterCols = clean.columns.length
 
@@ -326,7 +279,6 @@ object DataPreprocessingRUHFlights {
     println("========== Missing Values Before / After ==========")
     missingCompare.show(200, truncate = false)
 
-    // Hourly counts + label distribution (for sanity)
     if (clean.columns.contains("hour_of_day") && clean.columns.contains("peak_traffic_label")) {
       println("========== Hourly Volume + Peak Label ==========")
       clean.groupBy("hour_of_day", "peak_traffic_label").count()
@@ -337,66 +289,20 @@ object DataPreprocessingRUHFlights {
       clean.groupBy("peak_traffic_label").count().show(false)
     }
 
-    // ---------- SAVE (TWO DATASETS: Parquet + CSV) ----------
+    clean
+  }
 
-    // 1) Save FULL dataset as Parquet (keeps array columns like movement.quality)
-    clean.write.mode("overwrite").parquet(outputParquetPath)
-    println(s"Saved FULL Parquet dataset to: $outputParquetPath")
+  def main(args: Array[String]): Unit = {
+    val spark = SparkSession.builder()
+      .appName("RUH Flights Preprocessing")
+      .master("local[*]")
+      .getOrCreate()
 
-    // 2) Prepare CSV-safe version (convert array columns to string)
-    val cleanForCsv =
-      if (clean.columns.contains("movement.quality"))
-        clean.withColumn("movement.quality", concat_ws("|", c("movement.quality")))
-      else clean
+    val clean = buildPreprocessedData(spark)
 
-    // Save FULL dataset as CSV (Report Version)
-    cleanForCsv
-      .coalesce(1) // optional: single CSV file
-      .write.mode("overwrite")
-      .option("header", "true")
-      .csv(outputCsvPath)
+    println("========== FINAL SNAPSHOT ==========")
+    clean.show(20, truncate = false)
 
-    println(s"Saved FULL CSV dataset to: $outputCsvPath")
-
-    // ---------- EXTRA CSV REPORTS ----------
-    // Snapshot 20 rows (CSV-safe)
-    val snapshot = cleanForCsv.limit(20)
-    snapshot.show(20, truncate = false)
-
-    snapshot.coalesce(1).write.mode("overwrite").option("header", "true")
-      .csv(s"$resultsPath/final_snapshot_20_rows_csv")
-    println(s"Saved 20-row snapshot CSV to: $resultsPath/final_snapshot_20_rows_csv")
-
-    // Missing compare CSV
-    missingCompare.coalesce(1).write.mode("overwrite").option("header", "true")
-      .csv(s"$resultsPath/missing_before_after_csv")
-    println(s"Saved missing summary to: $resultsPath/missing_before_after_csv")
-
-    // Basic stats CSV
-    val basicStats = Seq(
-      ("before_rows", beforeRows.toString),
-      ("after_rows", afterRows.toString),
-      ("rows_removed", (beforeRows - afterRows).toString),
-      ("before_cols", beforeCols.toString),
-      ("after_cols", afterCols.toString)
-    ).toDF("metric", "value")
-
-    basicStats.coalesce(1).write.mode("overwrite").option("header", "true")
-      .csv(s"$resultsPath/basic_stats_csv")
-    println(s"Saved basic stats to: $resultsPath/basic_stats_csv")
-
-    // Optional: Hourly counts CSV (great for report)
-    if (clean.columns.contains("hour_of_day")) {
-      val hourlyCounts =
-        clean.groupBy("hour_of_day")
-          .agg(count(lit(1)).alias("flights_in_hour"))
-          .orderBy("hour_of_day")
-
-      hourlyCounts.coalesce(1).write.mode("overwrite").option("header", "true")
-        .csv(s"$resultsPath/hourly_counts_csv")
-      println(s"Saved hourly counts to: $resultsPath/hourly_counts_csv")
-    }
-
-    // spark.stop()
+    spark.stop()
   }
 }
