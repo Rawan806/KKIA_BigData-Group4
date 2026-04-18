@@ -18,17 +18,13 @@ object DataReductionRUHFlights {
       .getOrCreate()
 
     // -------- PATHS (REPO-RELATIVE) --------
-    val inputPath      = "data/processed/preprocessed_dataset_csv"
-    val outParquetPath = "data/processed/reduced_dataset.parquet"
-    val outCsvPath     = "data/processed/reduced_dataset_csv"
+val outParquetPath = "data/processed/reduced_dataset.parquet"
+val outCsvPath     = "data/processed/reduced_dataset_csv"
 
-    ensureDir("data/processed")
+ensureDir("data/processed")
 
-    // -------- LOAD --------
-    val df = spark.read
-      .option("header", "true")
-      .option("inferSchema", "true")
-      .csv(inputPath)
+// -------- LOAD DIRECTLY FROM ORIGINAL FILE VIA PREPROCESSING --------
+val df = DataPreprocessingRUHFlights.buildPreprocessedData(spark)
 
     val beforeRows = df.count()
     val beforeCols = df.columns.length

@@ -23,16 +23,15 @@ object DataTransformationRUHFlights {
       .getOrCreate()
 
     // -------- PATHS (REPO-RELATIVE) --------
-    val inputPath      = "data/processed/reduced_dataset.parquet"
-    val outParquetPath = "data/processed/transformed_dataset.parquet"
-    val outCsvPath     = "data/processed/transformed_dataset_csv"
-    val pipelinePath   = "models/transformation_pipeline"
+val outParquetPath = "data/processed/transformed_dataset.parquet"
+val outCsvPath     = "data/processed/transformed_dataset_csv"
+val pipelinePath   = "models/transformation_pipeline"
 
-    ensureDir("data/processed")
-    ensureDir("models")
+ensureDir("data/processed")
+ensureDir("models")
 
-    // -------- LOAD --------
-    var df = spark.read.parquet(inputPath)
+// -------- LOAD DIRECTLY FROM ORIGINAL FILE VIA PREPROCESSING --------
+var df = DataPreprocessingRUHFlights.buildPreprocessedData(spark)
 
     println("========== INPUT SCHEMA (BEFORE TRANSFORMATION) ==========")
     df.printSchema()
@@ -124,8 +123,7 @@ object DataTransformationRUHFlights {
 
     val pipeline = new Pipeline().setStages(indexers ++ Array(encoder, assembler))
 
-    val model: PipelineModel = pipeline.fit(df)
-    val transformed = model.transform(df)
+    val transformed = pipeline.fit(df).transform(df)
 
     // -------- 5) Validate schema --------
     println("\n========== FINAL SCHEMA (AFTER TRANSFORMATION) ==========")
